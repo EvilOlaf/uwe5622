@@ -4,11 +4,17 @@
 #include <linux/irq.h>
 #include <linux/kthread.h>
 #include <linux/mmc/host.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
+#else
 #include <linux/of_gpio.h>
+#endif
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
 #include <linux/vmalloc.h>
+#include <linux/ktime.h>
 #include <wcn_bus.h>
 
 #include "sdiohal.h"
@@ -56,7 +62,11 @@
 #define GNSS_DUMP_DATA_SIZE	0x38000
 
 #include <linux/module.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
+#else
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif
 
 enum {
 	/* SDIO TX */
@@ -99,8 +109,10 @@ char *tp_tx_buf[TP_TX_BUF_CNT];
 
 struct mchn_ops_t at_tx_ops;
 struct mchn_ops_t at_rx_ops;
-struct timeval tp_tx_start_time;
-struct timeval tp_tx_stop_time;
+ktime_t tp_tx_start_time;
+ktime_t tp_tx_stop_time;
+ktime_t tp_rx_start_time;
+ktime_t tp_rx_stop_time;
 int tp_tx_cnt;
 int tp_tx_flag;
 int tp_tx_buf_cnt = TP_TX_BUF_CNT;
@@ -225,7 +237,6 @@ static int sdiohal_throughput_tx(void)
 static void sdiohal_throughput_tx_compute_time(void)
 {
 	static signed long long times_count;
-	struct timespec now;
 
 	if (tp_tx_flag != 1)
 		return;
@@ -233,17 +244,12 @@ static void sdiohal_throughput_tx_compute_time(void)
 	/* throughput test */
 	tp_tx_cnt++;
 	if (tp_tx_cnt % 500 == 0) {
-		getnstimeofday(&now);
-		tp_tx_stop_time.tv_sec = now.tv_sec;
-		tp_tx_stop_time.tv_usec = now.tv_nsec/1000;
-		times_count = timeval_to_ns(&tp_tx_stop_time) -
-			timeval_to_ns(&tp_tx_start_time);
+		tp_tx_stop_time = ktime_get();
+		times_count = tp_tx_stop_time - tp_tx_start_time;
 		sdiohal_info("tx->times(500c) is %lldns, tx %d, rx %d\n",
 			     times_count, tp_tx_cnt, rx_pop_cnt);
 		tp_tx_cnt = 0;
-		getnstimeofday(&now);
-		tp_tx_start_time.tv_sec = now.tv_sec;
-		tp_tx_start_time.tv_usec = now.tv_nsec/1000;
+		tp_tx_start_time = ktime_get();
 	}
 	sdiohal_throughput_tx();
 }
@@ -547,14 +553,10 @@ int at_list_tx_pop(int channel, struct mbuf_t *head,
 }
 
 int tp_rx_cnt;
-struct timeval tp_rx_start_time;
-struct timeval tp_rx_stop_time;
-struct timespec tp_tm_begin;
 int at_list_rx_pop(int channel, struct mbuf_t *head,
 		   struct mbuf_t *tail, int num)
 {
-	static signed long long times_count;
-	struct timespec now;
+	ktime_t times_count;
 
 	sdiohal_debug("%s channel:%d head:%p tail:%p num:%d\n",
 		     __func__, channel, head, tail, num);
@@ -571,22 +573,17 @@ int at_list_rx_pop(int channel, struct mbuf_t *head,
 	/* throughput test */
 	tp_rx_cnt += num;
 	if (tp_rx_cnt / (500*64) == 1) {
-		getnstimeofday(&now);
-		tp_rx_stop_time.tv_sec = now.tv_sec;
-		tp_rx_stop_time.tv_usec = now.tv_nsec/1000;
-		times_count = timeval_to_ns(&tp_rx_stop_time)
-			- timeval_to_ns(&tp_rx_start_time);
+		tp_rx_stop_time = ktime_get();
+		times_count = tp_rx_stop_time - tp_rx_start_time;
+		times_count = tp_rx_stop_time - tp_rx_start_time;
 		sdiohal_info("rx->times(%dc) is %lldns, tx %d, rx %d\n",
-			     tp_rx_cnt, times_count, tp_tx_cnt, rx_pop_cnt);
+		     tp_rx_cnt, times_count, tp_tx_cnt, rx_pop_cnt);
 		tp_rx_cnt = 0;
-		getnstimeofday(&now);
-		tp_rx_start_time.tv_sec = now.tv_sec;
-		tp_rx_start_time.tv_usec = now.tv_nsec/1000;
-	}
-	getnstimeofday(&tp_tm_begin);
+		tp_rx_start_time = ktime_get();
 
+	}
 	return 0;
-}
+	}
 
 struct mchn_ops_t at_tx_ops = {
 	.channel = AT_TX_CHANNEL,
@@ -753,7 +750,11 @@ static int sdiohal_test_int_init(unsigned char func_tag)
 #ifdef CONFIG_WCN_PARSE_DTS
 	struct device_node *np;
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct gpio_desc *pub_gpio_desc = NULL;
+#else
 	unsigned int pub_gpio_num = 0;
+#endif
 	unsigned char reg_int_en = 0;
 	int ret;
 
@@ -768,8 +769,29 @@ static int sdiohal_test_int_init(unsigned char func_tag)
 		sdiohal_err("dts node not found");
 		return -1;
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	pub_gpio_desc = fwnode_gpiod_get_index(
+		of_fwnode_handle(np), "int-gpio", 0,
+		GPIOD_IN, "sdiohal-int-irq");
+	if (IS_ERR(pub_gpio_desc)) {
+		sdiohal_err("can not get int gpio\n");
+		return PTR_ERR(pub_gpio_desc);
+	}
+
+	ret = gpiod_direction_input(pub_gpio_desc);
+	if (ret < 0) {
+		sdiohal_err("gpio input set fail!!!");
+		return ret;
+	}
+
+	sdiohal_public_irq = gpiod_to_irq(pub_gpio_desc);
+#else
 	pub_gpio_num = of_get_named_gpio(np, "int-gpio", 0);
 #endif
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	/* GPIO already configured above */
+#else
 	sdiohal_info("pub_gpio_num:%d\n", pub_gpio_num);
 	ret = gpio_request(pub_gpio_num, "sdiohal_int_gpio");
 	if (ret < 0) {
@@ -785,6 +807,7 @@ static int sdiohal_test_int_init(unsigned char func_tag)
 	}
 
 	sdiohal_public_irq = gpio_to_irq(pub_gpio_num);
+#endif
 
 	ret = request_irq(sdiohal_public_irq,
 			sdiohal_public_isr,
@@ -1130,9 +1153,7 @@ static ssize_t at_cmd_write(struct file *filp,
 			__func__, tp_tx_buf_cnt, tp_tx_buf_len);
 		tp_tx_flag = 1;
 		tp_tx_cnt = 0;
-		getnstimeofday(&now);
-		tp_tx_start_time.tv_sec = now.tv_sec;
-		tp_tx_start_time.tv_usec = now.tv_nsec/1000;
+		tp_tx_start_time = ktime_get();
 		if ((tp_tx_buf_cnt <= TP_TX_BUF_CNT) &&
 			(tp_tx_buf_len <= TP_TX_BUF_LEN)) {
 			sprdwcn_bus_chn_deinit(&at_tx_ops);

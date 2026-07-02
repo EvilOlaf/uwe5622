@@ -568,7 +568,11 @@ void reset_wmmac_parameters(struct sprdwl_priv *priv)
 		g_wmmac_admittedtime[ac] = 0;
 	}
 	if (timer_pending(&priv->wmmac.wmmac_edcaf_timer))
+		#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+		timer_delete_sync(&priv->wmmac.wmmac_edcaf_timer);
+		#else
 		del_timer_sync(&priv->wmmac.wmmac_edcaf_timer);
+		#endif
 
 	memset(&priv->wmmac.ac[0], 0, 4*sizeof(struct wmm_ac_params));
 }
@@ -691,7 +695,11 @@ void update_admitted_time(struct sprdwl_priv *priv, u8 tsid, u16 medium_time, bo
 		else {
 			g_wmmac_admittedtime[ac] = 0;
 			if (timer_pending(&priv->wmmac.wmmac_edcaf_timer))
+				#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+				timer_delete_sync(&priv->wmmac.wmmac_edcaf_timer);
+				#else
 				del_timer_sync(&priv->wmmac.wmmac_edcaf_timer);
+				#endif
 		}
 	}
 
@@ -700,7 +708,11 @@ void update_admitted_time(struct sprdwl_priv *priv, u8 tsid, u16 medium_time, bo
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 void update_wmmac_edcaftime_timeout(struct timer_list *t)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+	struct sprdwl_priv *priv = timer_container_of(priv, t, wmmac.wmmac_edcaf_timer);
+#else
 	struct sprdwl_priv *priv = from_timer(priv, t, wmmac.wmmac_edcaf_timer);
+#endif
 #else
 void update_wmmac_edcaftime_timeout(unsigned long data)
 {

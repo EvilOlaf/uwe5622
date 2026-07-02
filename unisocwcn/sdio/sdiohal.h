@@ -345,7 +345,11 @@ struct sdiohal_data_t {
 
 	bool flag_init;
 	atomic_t flag_suspending;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct gpio_desc *gpio_num;
+#else
 	int gpio_num;
+#endif
 	unsigned int irq_num;
 	unsigned int irq_trigger_type;
 	atomic_t irq_cnt;

@@ -19,7 +19,13 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mfd/syscon.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
+#else
 #include <linux/of_gpio.h>
+#endif
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
@@ -27,7 +33,6 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/unistd.h>
-#include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
 #include <marlin_platform.h>
@@ -214,17 +219,30 @@ struct wcn_clock_info {
 	 * xtal-26m-clk-type-gpio config in the dts.
 	 * if xtal-26m-clk-type config in the dts,this gpio unvalid.
 	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct gpio_desc *gpio;
+#else
 	int gpio;
+#endif
 };
 
 struct marlin_device {
 	struct wcn_clock_info clk_xtal_26m;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct gpio_desc *coexist;
+	struct gpio_desc *wakeup_ap;
+	struct gpio_desc *ap_send_data;
+	struct gpio_desc *reset;
+	struct gpio_desc *chip_en;
+	struct gpio_desc *int_ap;
+#else
 	int coexist;
 	int wakeup_ap;
 	int ap_send_data;
 	int reset;
 	int chip_en;
 	int int_ap;
+#endif
 	/* power sequence */
 	/* VDDIO->DVDD12->chip_en->rst_N->AVDD12->AVDD33 */
 	struct regulator *dvdd12;
@@ -1411,24 +1429,73 @@ static irqreturn_t marlin_bt_wake_int_isr(int irq, void *para)
 
 static int marlin_registsr_bt_wake(struct device *dev)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
 	struct device_node *np;
-	int bt_wake_host_gpio, ret = 0;
-	enum of_gpio_flags config;
+	struct gpio_desc *bt_wake_host_gpio;
+	int ret = 0;
 
 	np = of_find_compatible_node(NULL, NULL, "allwinner,sunxi-btlpm");
 	if (!np) {
 		WCN_ERR("dts node for bt_wake not found");
 		return -EINVAL;
 	}
-	bt_wake_host_gpio = of_get_named_gpio_flags(np, "bt_hostwake", 0, &config);
+	bt_wake_host_gpio = fwnode_gpiod_get_index(of_fwnode_handle(np),
+				"bt_hostwake", 0, GPIOD_IN, "bt-wake-host-gpio");
+	if (IS_ERR(bt_wake_host_gpio)) {
+		WCN_ERR("bt_hostwake gpio get err\n");
+		return PTR_ERR(bt_wake_host_gpio);
+	}
+
+	marlin_dev->bt_wake_host_int_num = gpiod_to_irq(bt_wake_host_gpio);
+
+	WCN_INFO("%s bt_hostwake intnum=%d\n", __func__,
+		marlin_dev->bt_wake_host_int_num);
+
+	ret = device_init_wakeup(dev, true);
+	if (ret < 0) {
+		WCN_ERR("device init bt wakeup failed!\n");
+		return ret;
+	}
+
+	ret = dev_pm_set_wake_irq(dev,
+		marlin_dev->bt_wake_host_int_num);
+	if (ret < 0) {
+		WCN_ERR("can't enable wakeup src for bt_hostwake\n");
+		return ret;
+	}
+
+	ret = request_irq(marlin_dev->bt_wake_host_int_num,
+			  marlin_bt_wake_int_isr,
+			  IRQF_TRIGGER_RISING |
+			  IRQF_NO_SUSPEND,
+			  "bt_wake_isr",
+			  NULL);
+	if (ret != 0) {
+		WCN_ERR("req bt_hostwake irq-%d err! ret=%d",
+			marlin_dev->bt_wake_host_int_num, ret);
+		return ret;
+	}
+	disable_irq(marlin_dev->bt_wake_host_int_num);
+
+	return 0;
+#else
+	struct device_node *np;
+	int bt_wake_host_gpio, ret = 0;
+
+	np = of_find_compatible_node(NULL, NULL, "allwinner,sunxi-btlpm");
+	if (!np) {
+		WCN_ERR("dts node for bt_wake not found");
+		return -EINVAL;
+	}
+	bt_wake_host_gpio = of_get_named_gpio(np, "bt_hostwake", 0);
 	if (!gpio_is_valid(bt_wake_host_gpio)) {
 		WCN_ERR("bt_hostwake irq is invalid: %d\n",
 			bt_wake_host_gpio);
 		return -EINVAL;
 	}
 
-	ret = devm_gpio_request(dev, bt_wake_host_gpio,
-				"bt-wake-host-gpio");
+	ret = devm_gpio_request_one(dev, bt_wake_host_gpio, GPIOF_IN,
+					"bt-wake-host-gpio");
 	if (ret) {
 		WCN_ERR("bt-wake-host-gpio request err: %d\n",
 			bt_wake_host_gpio);
@@ -1476,6 +1543,7 @@ static int marlin_registsr_bt_wake(struct device *dev)
 	disable_irq(marlin_dev->bt_wake_host_int_num);
 
 	return 0;
+#endif
 }
 
 static void marlin_unregistsr_bt_wake(void)
@@ -1501,9 +1569,21 @@ static int marlin_parse_dt(struct platform_device *pdev)
 
 #if defined(CONFIG_WCN_PARSE_DTS) && defined(CONFIG_WCN_PMIC)
 	clk = &marlin_dev->clk_xtal_26m;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	clk->gpio = devm_gpiod_get_optional(&pdev->dev, "xtal-26m-clk-type-gpio",
+					GPIOD_IN);
+	if (IS_ERR(clk->gpio)) {
+		ret = PTR_ERR(clk->gpio);
+		WCN_ERR("xtal-26m-clk gpio get err: %d\n", ret);
+		return ret;
+	}
+	if (!clk->gpio)
+		WCN_INFO("xtal-26m-clk gpio not config\n");
+#else
 	clk->gpio = of_get_named_gpio(np, "xtal-26m-clk-type-gpio", 0);
 	if (!gpio_is_valid(clk->gpio))
 		WCN_INFO("xtal-26m-clk gpio not config\n");
+#endif
 
 	/* xtal-26m-clk-type has priority over than xtal-26m-clk-type-gpio */
 	ret = of_property_read_string(np, "xtal-26m-clk-type",
@@ -1585,10 +1665,19 @@ static int marlin_parse_dt(struct platform_device *pdev)
 #endif /* end of CONFIG_WCN_PARSE_DTS and CONFIG_WCN_PMIC */
 
 #ifdef CONFIG_WCN_PARSE_DTS
-	marlin_dev->chip_en = of_get_named_gpio(np, "wl-reg-on", 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	marlin_dev->chip_en = devm_gpiod_get_optional(&pdev->dev, "wl-reg-on",
+							GPIOD_OUT_LOW);
+	if (IS_ERR(marlin_dev->chip_en)) {
+		ret = PTR_ERR(marlin_dev->chip_en);
+		WCN_ERR("chip_en gpio get err: %d\n", ret);
+		return ret;
+	}
+	if (marlin_dev->chip_en) {
+		WCN_INFO("%s chip_en gpio configured\n", __func__);
+	}
 #else
-	marlin_dev->chip_en = 0;
-#endif
+	marlin_dev->chip_en = of_get_named_gpio(np, "wl-reg-on", 0);
 	if (marlin_dev->chip_en > 0) {
 		WCN_INFO("%s chip_en gpio=%d\n", __func__,
 			 marlin_dev->chip_en);
@@ -1604,12 +1693,25 @@ static int marlin_parse_dt(struct platform_device *pdev)
 			marlin_dev->chip_en = 0;
 		}
 	}
+#endif
+#else
+	marlin_dev->chip_en = 0;
+#endif
 
 #ifdef CONFIG_WCN_PARSE_DTS
-	marlin_dev->reset = of_get_named_gpio(np, "bt-reg-on", 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	marlin_dev->reset = devm_gpiod_get_optional(&pdev->dev, "bt-reg-on",
+							GPIOD_OUT_LOW);
+	if (IS_ERR(marlin_dev->reset)) {
+		ret = PTR_ERR(marlin_dev->reset);
+		WCN_ERR("reset gpio get err: %d\n", ret);
+		return ret;
+	}
+	if (marlin_dev->reset) {
+		WCN_INFO("%s reset gpio configured\n", __func__);
+	}
 #else
-	marlin_dev->reset = 0;
-#endif
+	marlin_dev->reset = of_get_named_gpio(np, "bt-reg-on", 0);
 	if (marlin_dev->reset > 0) {
 		WCN_INFO("%s reset gpio=%d\n", __func__, marlin_dev->reset);
 		if (!gpio_is_valid(marlin_dev->reset)) {
@@ -1624,12 +1726,25 @@ static int marlin_parse_dt(struct platform_device *pdev)
 			marlin_dev->reset = 0;
 		}
 	}
+#endif
+#else
+	marlin_dev->reset = 0;
+#endif
 
 #ifdef CONFIG_WCN_PARSE_DTS
-	marlin_dev->int_ap = of_get_named_gpio(np, "pub-int-gpio", 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	marlin_dev->int_ap = devm_gpiod_get_optional(&pdev->dev, "pub-int-gpio",
+							GPIOD_IN);
+	if (IS_ERR(marlin_dev->int_ap)) {
+		ret = PTR_ERR(marlin_dev->int_ap);
+		WCN_ERR("int_ap gpio get err: %d\n", ret);
+		return ret;
+	}
+	if (marlin_dev->int_ap) {
+		WCN_INFO("%s int gpio configured\n", __func__);
+	}
 #else
-	marlin_dev->int_ap = 0;
-#endif
+	marlin_dev->int_ap = of_get_named_gpio(np, "pub-int-gpio", 0);
 	if (marlin_dev->int_ap > 0) {
 		WCN_INFO("%s int gpio=%d\n", __func__, marlin_dev->int_ap);
 		if (!gpio_is_valid(marlin_dev->int_ap)) {
@@ -1644,14 +1759,22 @@ static int marlin_parse_dt(struct platform_device *pdev)
 			marlin_dev->int_ap = 0;
 		}
 	}
+#endif
+#else
+	marlin_dev->int_ap = 0;
+#endif
 
 #ifdef CONFIG_WCN_PARSE_DTS
 #ifdef CONFIG_WCN_PMIC
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	/* GPIO managed automatically with devm_gpiod_get */
+#else
 	if (gpio_is_valid(clk->gpio)) {
 		ret = gpio_request(clk->gpio, "wcn_xtal_26m_type");
 		if (ret)
 			WCN_ERR("xtal 26m gpio request err: %d\n", ret);
 	}
+#endif
 #endif
 
 	ret = of_property_read_string(np, "unisoc,btwf-file-name",
@@ -1688,6 +1811,21 @@ static int marlin_parse_dt(struct platform_device *pdev)
 
 #ifdef CONFIG_WCN_PARSE_DTS
 	if (of_property_read_bool(np, "bt-wake-host")) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+		struct gpio_desc *bt_wake_host_gpio;
+
+		WCN_INFO("wcn config bt wake host\n");
+		marlin_dev->bt_wl_wake_host_en |= BIT(BT_WAKE_HOST);
+		bt_wake_host_gpio = devm_gpiod_get_optional(&pdev->dev,
+						"bt-wake-host-gpio", GPIOD_IN);
+		if (IS_ERR(bt_wake_host_gpio)) {
+			ret = PTR_ERR(bt_wake_host_gpio);
+			WCN_ERR("bt-wake-host-gpio get err: %d\n", ret);
+			return ret;
+		}
+		if (bt_wake_host_gpio)
+			WCN_INFO("%s bt-wake-host-gpio configured\n", __func__);
+#else
 		int bt_wake_host_gpio;
 
 		WCN_INFO("wcn config bt wake host\n");
@@ -1705,6 +1843,7 @@ static int marlin_parse_dt(struct platform_device *pdev)
 		if (ret)
 			WCN_ERR("bt-wake-host-gpio request err: %d\n",
 				bt_wake_host_gpio);
+#endif
 	}
 #else
 #ifdef CONFIG_BT_WAKE_HOST_EN
@@ -1720,6 +1859,21 @@ static int marlin_parse_dt(struct platform_device *pdev)
 
 #ifdef CONFIG_WCN_PARSE_DTS
 	if (of_property_read_bool(np, "wl-wake-host")) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+		struct gpio_desc *wl_wake_host_gpio;
+
+		WCN_INFO("wcn config wifi wake host\n");
+		marlin_dev->bt_wl_wake_host_en |= BIT(WL_WAKE_HOST);
+		wl_wake_host_gpio = devm_gpiod_get_optional(&pdev->dev,
+						"wl-wake-host-gpio", GPIOD_IN);
+		if (IS_ERR(wl_wake_host_gpio)) {
+			ret = PTR_ERR(wl_wake_host_gpio);
+			WCN_ERR("wl-wake-host-gpio get err: %d\n", ret);
+			return ret;
+		}
+		if (wl_wake_host_gpio)
+			WCN_INFO("%s wl-wake-host-gpio configured\n", __func__);
+#else
 		int wl_wake_host_gpio;
 
 		WCN_INFO("wcn config wifi wake host\n");
@@ -1737,6 +1891,7 @@ static int marlin_parse_dt(struct platform_device *pdev)
 		if (ret)
 			WCN_ERR("wl-wake-host-gpio request err: %d\n",
 				wl_wake_host_gpio);
+#endif
 	}
 #else
 #ifdef CONFIG_WL_WAKE_HOST_EN
@@ -1778,6 +1933,9 @@ static int marlin_parse_dt(struct platform_device *pdev)
 
 static int marlin_gpio_free(struct platform_device *pdev)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	/* GPIOs are managed automatically with devm_gpiod_get */
+#else
 	if (!marlin_dev)
 		return -1;
 
@@ -1787,6 +1945,7 @@ static int marlin_gpio_free(struct platform_device *pdev)
 		gpio_free(marlin_dev->chip_en);
 	if (marlin_dev->int_ap > 0)
 		gpio_free(marlin_dev->int_ap);
+#endif
 
 	return 0;
 }
@@ -2586,6 +2745,13 @@ static int marlin_reset(int val)
 	hi_gpio_set_value(RTL_REG_RST_GPIO, 1);
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	if (!IS_ERR_OR_NULL(marlin_dev->reset)) {
+		gpiod_set_value(marlin_dev->reset, 0);
+		mdelay(RESET_DELAY);
+		gpiod_set_value(marlin_dev->reset, 1);
+	}
+#else
 	if (marlin_dev->reset > 0) {
 		if (gpio_is_valid(marlin_dev->reset)) {
 			gpio_direction_output(marlin_dev->reset, 0);
@@ -2593,6 +2759,7 @@ static int marlin_reset(int val)
 			gpio_direction_output(marlin_dev->reset, 1);
 		}
 	}
+#endif
 
 	return 0;
 }
@@ -2618,6 +2785,19 @@ static int chip_reset_release(int val)
 		reset_count--;
 	}
 #else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	if (IS_ERR_OR_NULL(marlin_dev->reset))
+		return 0;
+
+	if (val) {
+		if (reset_count == 0)
+			gpiod_set_value(marlin_dev->reset, 1);
+		reset_count++;
+	} else {
+		gpiod_set_value(marlin_dev->reset, 0);
+		reset_count--;
+	}
+#else
 	if (marlin_dev->reset <= 0)
 		return 0;
 
@@ -2633,6 +2813,7 @@ static int chip_reset_release(int val)
 		gpio_direction_output(marlin_dev->reset, 0);
 		reset_count--;
 	}
+#endif
 #endif
 
 	return 0;
@@ -2680,6 +2861,32 @@ void marlin_chip_en(bool enable, bool reset)
 	 * Incar board pull chipen gpio at pin control.
 	 * Hisi board pull chipen gpio at hi_sdio_detect.ko.
 	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	if (IS_ERR_OR_NULL(marlin_dev->chip_en))
+		return;
+
+	if (reset) {
+		gpiod_set_value(marlin_dev->chip_en, 0);
+		WCN_INFO("marlin gnss chip en reset\n");
+		msleep(100);
+		gpiod_set_value(marlin_dev->chip_en, 1);
+	} else if (enable) {
+		if (chip_en_count == 0) {
+			gpiod_set_value(marlin_dev->chip_en, 0);
+			mdelay(1);
+			gpiod_set_value(marlin_dev->chip_en, 1);
+			mdelay(1);
+			WCN_INFO("marlin chip en pull up\n");
+		}
+		chip_en_count++;
+	} else {
+		chip_en_count--;
+		if (chip_en_count == 0) {
+			gpiod_set_value(marlin_dev->chip_en, 0);
+			WCN_INFO("marlin chip en pull down\n");
+		}
+	}
+#else
 	if (marlin_dev->chip_en <= 0)
 		return;
 
@@ -2706,6 +2913,7 @@ void marlin_chip_en(bool enable, bool reset)
 			}
 		}
 	}
+#endif
 }
 EXPORT_SYMBOL_GPL(marlin_chip_en);
 
@@ -3829,10 +4037,15 @@ static int marlin_probe(struct platform_device *pdev)
 	marlin_dev->power_state = 0;
 	if (marlin_parse_dt(pdev) < 0)
 		WCN_INFO("marlin2 parse_dt some para not config\n");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	if (!IS_ERR_OR_NULL(marlin_dev->reset))
+		gpiod_set_value(marlin_dev->reset, 0);
+#else
 	if (marlin_dev->reset > 0) {
 		if (gpio_is_valid(marlin_dev->reset))
 			gpio_direction_output(marlin_dev->reset, 0);
 	}
+#endif
 	init_completion(&ge2_completion);
 	init_completion(&marlin_dev->carddetect_done);
 #ifdef CONFIG_WCN_SLP
@@ -3903,7 +4116,7 @@ static int marlin_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int  marlin_remove(struct platform_device *pdev)
+static void marlin_remove(struct platform_device *pdev)
 {
 #if (defined(CONFIG_BT_WAKE_HOST_EN) && defined(CONFIG_AW_BOARD))
 	marlin_unregistsr_bt_wake();
@@ -3944,7 +4157,7 @@ static int  marlin_remove(struct platform_device *pdev)
 
 	WCN_INFO("marlin_remove ok!\n");
 
-	return 0;
+	return;
 }
 
 static void marlin_shutdown(struct platform_device *pdev)

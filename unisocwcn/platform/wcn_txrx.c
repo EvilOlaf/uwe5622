@@ -301,8 +301,11 @@ int mdbg_ring_init(void)
 		return -MDBG_ERR_MALLOC_FAIL;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
+	/*wakeup_source pointer*/
 	ring_dev->rw_ws = wakeup_source_create("mdbg_wake_lock");
 	wakeup_source_add(ring_dev->rw_ws);
+#endif
 	spin_lock_init(&ring_dev->rw_lock);
 	mutex_init(&ring_dev->mdbg_read_mutex);
 	INIT_LIST_HEAD(&ring_dev->rx_head);
@@ -328,8 +331,13 @@ void mdbg_ring_remove(void)
 		kfree(pos);
 	}
 	mutex_destroy(&ring_dev->mdbg_read_mutex);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
+	/*wakeup_source pointer*/
 	wakeup_source_remove(ring_dev->rw_ws);
 	wakeup_source_destroy(ring_dev->rw_ws);
+#endif
+
 	mdbg_ring_destroy(ring_dev->ring);
 	mdbg_dev->ring_dev = NULL;
 	kfree(ring_dev);

@@ -314,8 +314,13 @@ int sdio_pub_int_init(int irq)
 	sdio_int.pub_int_sts0 = REG_PUB_INT_STS0;
 
 	atomic_set(&flag_pub_int_done, 1);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
+	/*wakeup_source pointer*/
 	sdio_int.pub_int_ws = wakeup_source_create("pub_int_ws");
 	wakeup_source_add(sdio_int.pub_int_ws);
+#endif
+
 	init_completion(&(sdio_int.pub_int_completion));
 
 	sdio_pub_int_register(irq);
@@ -344,8 +349,12 @@ int sdio_pub_int_deinit(void)
 	sdio_power_notify = FALSE;
 	disable_irq(sdio_int.pub_int_num);
 	free_irq(sdio_int.pub_int_num, NULL);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
+	/*wakeup_source pointer*/
 	wakeup_source_remove(sdio_int.pub_int_ws);
 	wakeup_source_destroy(sdio_int.pub_int_ws);
+#endif
 
 	SLP_MGR_INFO("%s ok!\n", __func__);
 

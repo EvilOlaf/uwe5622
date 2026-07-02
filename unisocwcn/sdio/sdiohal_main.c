@@ -22,7 +22,13 @@
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
+#else
 #include <linux/of_gpio.h>
+#endif
 #include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
 #include <linux/mmc/card.h>
@@ -1201,7 +1207,11 @@ static int sdiohal_enable_slave_irq(void)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int sdiohal_host_irq_init(struct gpio_desc *desc)
+#else
 static int sdiohal_host_irq_init(unsigned int irq_gpio_num)
+#endif
 {
 	struct sdiohal_data_t *p_data = sdiohal_get_data();
 	int ret = 0;
@@ -1220,6 +1230,19 @@ static int sdiohal_host_irq_init(unsigned int irq_gpio_num)
 		     ((p_data->irq_trigger_type == IRQF_TRIGGER_LOW) ?
 		     "low" : "high"));
 #else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	if (IS_ERR_OR_NULL(desc))
+		return ret;
+
+	ret = gpiod_direction_input(desc);
+	if (ret < 0) {
+		sdiohal_err("gpio input set fail!!!");
+		return ret;
+	}
+
+	p_data->irq_num = gpiod_to_irq(desc);
+	p_data->irq_trigger_type = IRQF_TRIGGER_HIGH;
+#else
 	if (irq_gpio_num == 0)
 		return ret;
 
@@ -1237,6 +1260,7 @@ static int sdiohal_host_irq_init(unsigned int irq_gpio_num)
 
 	p_data->irq_num = gpio_to_irq(irq_gpio_num);
 	p_data->irq_trigger_type = IRQF_TRIGGER_HIGH;
+#endif
 #endif
 
 	return ret;
@@ -1349,18 +1373,32 @@ static int sdiohal_parse_dt(void)
 		p_data->irq_type = SDIOHAL_RX_INBAND_IRQ;
 	else if (of_get_property(np, "rx-polling", NULL))
 		p_data->irq_type = SDIOHAL_RX_POLLING;
-	else {
-		p_data->irq_type = SDIOHAL_RX_EXTERNAL_IRQ;
-		p_data->gpio_num =
-			of_get_named_gpio(np, "sdio-ext-int-gpio", 0);
-		if (!gpio_is_valid(p_data->gpio_num)) {
-			sdiohal_err("can not get sdio int gpio%d\n",
-				    p_data->gpio_num);
-			p_data->gpio_num = 0;
+		else {
+			p_data->irq_type = SDIOHAL_RX_EXTERNAL_IRQ;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+			p_data->gpio_num = fwnode_gpiod_get_index(
+				of_fwnode_handle(np), "sdio-ext-int-gpio", 0,
+				GPIOD_IN, "sdiohal-ext-irq");
+			if (IS_ERR(p_data->gpio_num)) {
+				sdiohal_err("can not get sdio int gpio\n");
+				p_data->gpio_num = NULL;
+			}
+#else
+			p_data->gpio_num =
+				of_get_named_gpio(np, "sdio-ext-int-gpio", 0);
+			if (!gpio_is_valid(p_data->gpio_num)) {
+				sdiohal_err("can not get sdio int gpio%d\n",
+					    p_data->gpio_num);
+				p_data->gpio_num = 0;
+			}
+#endif
 		}
-	}
-#else /* else of CONFIG_WCN_PARSE_DTS */
-	p_data->gpio_num = 0;
+	#else /* else of CONFIG_WCN_PARSE_DTS */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+		p_data->gpio_num = NULL;
+#else
+		p_data->gpio_num = 0;
+#endif
 #endif
 
 	/* block size */
@@ -1372,6 +1410,16 @@ static int sdiohal_parse_dt(void)
 		p_data->blk_size = true;
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	sdiohal_info("%s adma_tx:%d, adma_rx:%d, pwrseq:%d, irq type:%s, "
+		     "gpio_num:%p, blksize:%d\n",
+		     __func__, p_data->adma_tx_enable,
+		     p_data->adma_rx_enable, p_data->pwrseq,
+		     ((p_data->irq_type == SDIOHAL_RX_EXTERNAL_IRQ) ? "gpio" :
+		     (((p_data->irq_type == SDIOHAL_RX_INBAND_IRQ) ?
+		     "data" : "polling"))), p_data->gpio_num,
+		     sprdwcn_bus_get_blk_size());
+#else
 	sdiohal_info("%s adma_tx:%d, adma_rx:%d, pwrseq:%d, irq type:%s, "
 		     "gpio_num:%d, blksize:%d\n",
 		     __func__, p_data->adma_tx_enable,
@@ -1380,6 +1428,7 @@ static int sdiohal_parse_dt(void)
 		     (((p_data->irq_type == SDIOHAL_RX_INBAND_IRQ) ?
 		     "data" : "polling"))), p_data->gpio_num,
 		     sprdwcn_bus_get_blk_size());
+#endif
 
 #ifdef CONFIG_WCN_PARSE_DTS
 	sdio_node = of_parse_phandle(np, "sdhci-name", 0);
@@ -2298,9 +2347,13 @@ void sdiohal_exit(void)
 		sdiohal_info("Already exist card!\n");
 		sdiohal_remove_card();
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	/* GPIO managed automatically with devm_gpiod_get */
+#else
 	if ((p_data->irq_type == SDIOHAL_RX_EXTERNAL_IRQ) &&
 		(p_data->irq_num > 0))
 		gpio_free(p_data->gpio_num);
+#endif
 	sdiohal_stop_thread();
 	sdiohal_misc_deinit();
 	if (sdiohal_data) {

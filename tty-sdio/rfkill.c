@@ -20,8 +20,12 @@
 #include <linux/gpio.h>
 #include <linux/ioport.h>
 #include <linux/clk.h>
-#include <linux/of_gpio.h>
 #include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#include <linux/gpio/consumer.h>
+#else
+#include <linux/of_gpio.h>
+#endif
 #include <marlin_platform.h>
 
 

@@ -21,7 +21,11 @@ static void sprdwl_tcp_ack_timeout(unsigned long data)
 	struct sprdwl_tcp_ack_manage *ack_m = NULL;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+	ack_info = (struct sprdwl_tcp_ack_info *)timer_container_of(ack_info, t, timer);
+#else
 	ack_info = (struct sprdwl_tcp_ack_info *)from_timer(ack_info, t, timer);
+#endif
 #else
 	ack_info = (struct sprdwl_tcp_ack_info *)data;
 #endif
@@ -84,7 +88,11 @@ void sprdwl_tcp_ack_deinit(struct sprdwl_priv *priv)
 		drop_msg = NULL;
 
 		write_seqlock_bh(&ack_m->ack_info[i].seqlock);
+		#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+		timer_delete(&ack_m->ack_info[i].timer);
+		#else
 		del_timer(&ack_m->ack_info[i].timer);
+		#endif
 		drop_msg = ack_m->ack_info[i].msgbuf;
 		ack_m->ack_info[i].msgbuf = NULL;
 		write_sequnlock_bh(&ack_m->ack_info[i].seqlock);
@@ -342,7 +350,11 @@ int sprdwl_tcp_ack_handle(struct sprdwl_msg_buf *new_msgbuf,
 			if (ack_info->msgbuf) {
 				drop_msg = ack_info->msgbuf;
 				ack_info->msgbuf = NULL;
+				#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+				timer_delete(&ack_info->timer);
+				#else
 				del_timer(&ack_info->timer);
+				#endif
 			}
 
 			ack_info->in_send_msg = NULL;
@@ -374,7 +386,11 @@ int sprdwl_tcp_ack_handle(struct sprdwl_msg_buf *new_msgbuf,
 				   atomic_read(&ack_m->max_drop_cnt)))) {
 			ack_info->drop_cnt = 0;
 			ack_info->in_send_msg = new_msgbuf;
+			#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+			timer_delete(&ack_info->timer);
+			#else
 			del_timer(&ack_info->timer);
+			#endif
 		} else {
 			ret = 1;
 			ack_info->msgbuf = new_msgbuf;
@@ -537,7 +553,11 @@ void enable_tcp_ack_delay(char *buf, unsigned char offset)
 			write_seqlock_bh(&ack_m->ack_info[i].seqlock);
 			drop_msg = ack_m->ack_info[i].msgbuf;
 			ack_m->ack_info[i].msgbuf = NULL;
+			#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+			timer_delete(&ack_m->ack_info[i].timer);
+			#else
 			del_timer(&ack_m->ack_info[i].timer);
+			#endif
 			write_sequnlock_bh(&ack_m->ack_info[i].seqlock);
 
 			if (drop_msg)

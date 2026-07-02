@@ -394,7 +394,11 @@ int sprdwl_init_fw(struct sprdwl_vif *vif)
 	struct sprdwl_priv *priv = vif->priv;
 	enum nl80211_iftype type = vif->wdev.iftype;
 	enum sprdwl_mode mode;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+	u8 mac[ETH_ALEN];
+#else
 	u8 *mac;
+#endif
 	u8 vif_ctx_id = 0;
 
 	wl_ndev_log(L_DBG, vif->ndev, "%s type %d, mode %d\n", __func__, type,
@@ -426,10 +430,17 @@ int sprdwl_init_fw(struct sprdwl_vif *vif)
 	}
 
 	vif->mode = mode;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+	if (!vif->ndev)
+		ether_addr_copy(mac, vif->wdev.address);
+	else
+		ether_addr_copy(mac, vif->ndev->dev_addr);
+#else
 	if (!vif->ndev)
 		mac = vif->wdev.address;
 	else
 		mac = vif->ndev->dev_addr;
+#endif
 
 	if (sprdwl_open_fw(priv, &vif_ctx_id, vif->mode, mac)) {
 		wl_ndev_log(L_ERR, vif->ndev, "%s failed!\n", __func__);
@@ -702,8 +713,31 @@ static int sprdwl_add_cipher_key(struct sprdwl_vif *vif, bool pairwise,
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int sprdwl_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+				   int link_id, u8 key_index, bool pairwise,
+				   const u8 *mac_addr,
+				   struct key_params *params)
+{
+	struct sprdwl_vif *vif = netdev_priv(wdev->netdev);
+
+	vif->key_index[pairwise] = key_index;
+	vif->key_len[pairwise][key_index] = params->key_len;
+	memcpy(vif->key[pairwise][key_index], params->key, params->key_len);
+
+	/* PMK is for Roaming offload */
+	if (params->cipher == WLAN_CIPHER_SUITE_PMK)
+		return sprdwl_set_roam_offload(vif->priv, vif->ctx_id,
+					       SPRDWL_ROAM_OFFLOAD_SET_PMK,
+					       params->key, params->key_len);
+	else
+		return sprdwl_add_cipher_key(vif, pairwise, key_index,
+					     params->cipher, params->seq,
+					     mac_addr);
+}
+#else
 static int sprdwl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
-				   u8 key_index, bool pairwise,
+				   int link_id, u8 key_index, bool pairwise,
 				   const u8 *mac_addr,
 				   struct key_params *params)
 {
@@ -723,9 +757,40 @@ static int sprdwl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
 					     params->cipher, params->seq,
 					     mac_addr);
 }
+#endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+				   int link_id, u8 key_index, bool pairwise,
+				   const u8 *mac_addr)
+{
+	struct sprdwl_vif *vif = netdev_priv(wdev->netdev);
+
+	wl_ndev_log(L_DBG, vif->ndev, "%s key_index=%d, pairwise=%d\n",
+		    __func__, key_index, pairwise);
+
+	if (key_index > SPRDWL_MAX_KEY_INDEX) {
+		wl_ndev_log(L_ERR, vif->ndev, "%s key index %d out of bounds!\n", __func__,
+			   key_index);
+		return -ENOENT;
+	}
+
+	if (!vif->key_len[pairwise][key_index]) {
+		wl_ndev_log(L_ERR, vif->ndev, "%s key index %d is empty!\n", __func__,
+			   key_index);
+		return 0;
+	}
+
+	vif->key_len[pairwise][key_index] = 0;
+	vif->prwise_crypto = SPRDWL_CIPHER_NONE;
+	vif->grp_crypto = SPRDWL_CIPHER_NONE;
+
+	return sprdwl_del_key(vif->priv, vif->ctx_id, key_index,
+			      pairwise, mac_addr);
+}
+#else
 static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
-				   u8 key_index, bool pairwise,
+				   int link_id, u8 key_index, bool pairwise,
 				   const u8 *mac_addr)
 {
 	struct sprdwl_vif *vif = netdev_priv(ndev);
@@ -752,10 +817,12 @@ static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
 	return sprdwl_del_key(vif->priv, vif->ctx_id, key_index,
 			      pairwise, mac_addr);
 }
+#endif
+
 
 static int sprdwl_cfg80211_set_default_key(struct wiphy *wiphy,
 					   struct net_device *ndev,
-					   u8 key_index, bool unicast,
+					   int link_id, u8 key_index, bool unicast,
 					   bool multicast)
 {
 	struct sprdwl_vif *vif = netdev_priv(ndev);
@@ -962,6 +1029,29 @@ err_start:
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+static int sprdwl_cfg80211_change_beacon(struct wiphy *wiphy,
+					 struct net_device *ndev,
+					 struct cfg80211_ap_update *info)
+{
+	struct sprdwl_vif *vif = netdev_priv(ndev);
+
+	wl_ndev_log(L_DBG, ndev, "%s\n", __func__);
+#ifdef DFS_MASTER
+	/*send beacon tail ie if needed*/
+	if (info->beacon.tail_len)
+		sprdwl_reset_beacon(vif->priv, vif->ctx_id,
+					info->beacon.tail, info->beacon.tail_len);
+	/*enable wifi traffic*/
+	if (!netif_carrier_ok(vif->ndev))
+		netif_carrier_on(vif->ndev);
+	if (netif_queue_stopped(vif->ndev))
+		netif_wake_queue(vif->ndev);
+#endif
+
+	return sprdwl_change_beacon(vif, &info->beacon);
+}
+#else
 static int sprdwl_cfg80211_change_beacon(struct wiphy *wiphy,
 					 struct net_device *ndev,
 					 struct cfg80211_beacon_data *beacon)
@@ -983,6 +1073,7 @@ static int sprdwl_cfg80211_change_beacon(struct wiphy *wiphy,
 
 	return sprdwl_change_beacon(vif, beacon);
 }
+#endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19, 2))
 static int sprdwl_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *ndev, unsigned int link_id)
@@ -1002,15 +1093,29 @@ static int sprdwl_cfg80211_stop_ap(struct wiphy *wiphy, struct net_device *ndev)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int sprdwl_cfg80211_add_station(struct wiphy *wiphy,
+					   struct wireless_dev *wdev, const u8 *mac,
+					   struct station_parameters *params)
+{
+	return 0;
+}
+#else
 static int sprdwl_cfg80211_add_station(struct wiphy *wiphy,
 				       struct net_device *ndev, const u8 *mac,
 				       struct station_parameters *params)
 {
 	return 0;
 }
+#endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int sprdwl_cfg80211_del_station(struct wiphy *wiphy,
+					   struct wireless_dev *wdev,
+#else
 static int sprdwl_cfg80211_del_station(struct wiphy *wiphy,
 				       struct net_device *ndev,
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 83)
 					   struct station_del_parameters *params
 #else
@@ -1019,22 +1124,38 @@ static int sprdwl_cfg80211_del_station(struct wiphy *wiphy,
 					)
 
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	struct sprdwl_vif *vif = netdev_priv(wdev->netdev);
+#else
 	struct sprdwl_vif *vif = netdev_priv(ndev);
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 83)
 	if (!params->mac) {
 #else
 	if (!mac) {
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+		wl_ndev_log(L_DBG, wdev->netdev, "ignore NULL MAC address!\n");
+#else
 		wl_ndev_log(L_DBG, ndev, "ignore NULL MAC address!\n");
+#endif
 		goto out;
 	}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 83)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	wl_ndev_log(L_DBG, wdev->netdev, "%s %pM reason:%d\n", __func__, params->mac,
+#else
 	wl_ndev_log(L_DBG, ndev, "%s %pM reason:%d\n", __func__, params->mac,
+#endif
 			params->reason_code);
 	sprdwl_del_station(vif->priv, vif->ctx_id, params->mac,
 			params->reason_code);
 #else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+	wl_ndev_log(L_DBG, wdev->netdev, "%s %pM\n", __func__, mac);
+#else
 	wl_ndev_log(L_DBG, ndev, "%s %pM\n", __func__, mac);
+#endif
 	sprdwl_del_station(vif->priv, vif->ctx_id, mac,
 			   WLAN_REASON_DEAUTH_LEAVING);
 #endif
@@ -1044,6 +1165,15 @@ out:
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int
+sprdwl_cfg80211_change_station(struct wiphy *wiphy,
+				   struct wireless_dev *wdev, const u8 *mac,
+				   struct station_parameters *params)
+{
+	return 0;
+}
+#else
 static int
 sprdwl_cfg80211_change_station(struct wiphy *wiphy,
 			       struct net_device *ndev, const u8 *mac,
@@ -1051,11 +1181,86 @@ sprdwl_cfg80211_change_station(struct wiphy *wiphy,
 {
 	return 0;
 }
+#endif
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+static int sprdwl_cfg80211_get_station(struct wiphy *wiphy,
+					   struct wireless_dev *wdev, const u8 *mac,
+					   struct station_info *sinfo)
+{
+	struct sprdwl_vif *vif = netdev_priv(wdev->netdev);
+	struct sprdwl_cmd_get_station sta;
+	struct sprdwl_rate_info *rate;
+	int ret;
+
+	sinfo->filled |= BIT(NL80211_STA_INFO_TX_BYTES) |
+			 BIT(NL80211_STA_INFO_TX_PACKETS) |
+			 BIT(NL80211_STA_INFO_RX_BYTES) |
+			 BIT(NL80211_STA_INFO_RX_PACKETS);
+	sinfo->tx_bytes = wdev->netdev->stats.tx_bytes;
+	sinfo->tx_packets = wdev->netdev->stats.tx_packets;
+	sinfo->rx_bytes = wdev->netdev->stats.rx_bytes;
+	sinfo->rx_packets = wdev->netdev->stats.rx_packets;
+
+	/* Get current station info */
+	ret = sprdwl_get_station(vif->priv, vif->ctx_id,
+				 &sta);
+	if (ret)
+		goto out;
+	rate = (struct sprdwl_rate_info *)&sta;
+
+	sinfo->signal = sta.signal;
+	sinfo->filled |= BIT(NL80211_STA_INFO_SIGNAL);
+
+	sinfo->tx_failed = sta.txfailed;
+	sinfo->filled |= BIT(NL80211_STA_INFO_TX_BITRATE) |
+		BIT(NL80211_STA_INFO_TX_FAILED);
+
+	/*fill rate info */
+	/*if bit 2,3,4 not set*/
+	if (!(rate->flags & 0x1c))
+		sinfo->txrate.bw = RATE_INFO_BW_20;
+
+	if ((rate->flags) & BIT(2))
+		sinfo->txrate.bw = RATE_INFO_BW_40;
+
+	if ((rate->flags) & BIT(3))
+		sinfo->txrate.bw = RATE_INFO_BW_80;
+
+	if ((rate->flags) & BIT(4) ||
+		(rate->flags) & BIT(5))
+		sinfo->txrate.bw = RATE_INFO_BW_160;
+
+	if ((rate->flags) & BIT(6))
+		sinfo->txrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
+
+	if ((rate->flags & RATE_INFO_FLAGS_MCS) ||
+		(rate->flags & RATE_INFO_FLAGS_VHT_MCS)) {
+
+		sinfo->txrate.flags = (rate->flags & 0x3);
+		sinfo->txrate.mcs = rate->mcs;
+
+		if ((rate->flags & RATE_INFO_FLAGS_VHT_MCS) &&
+			(0 != rate->nss)) {
+			sinfo->txrate.nss = rate->nss;
+		}
+	} else {
+		sinfo->txrate.legacy = rate->legacy;
+	}
+
+	wl_ndev_log(L_DBG, wdev->netdev, "%s signal %d legacy %d mcs:%d flags:0x:%x\n",
+			__func__, sinfo->signal, sinfo->txrate.legacy,
+			rate->mcs, rate->flags);
+out:
+	return ret;
+}
+
+#else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 83)
 static int sprdwl_cfg80211_get_station(struct wiphy *wiphy,
-				       struct net_device *ndev, const u8 *mac,
-				       struct station_info *sinfo)
+					       struct net_device *ndev, const u8 *mac,
+					       struct station_info *sinfo)
 {
 	struct sprdwl_vif *vif = netdev_priv(ndev);
 	struct sprdwl_cmd_get_station sta;
@@ -1123,11 +1328,13 @@ static int sprdwl_cfg80211_get_station(struct wiphy *wiphy,
 out:
 	return ret;
 }
+#endif
+#endif
 
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 83)
 static int sprdwl_cfg80211_get_station(struct wiphy *wiphy,
-				       struct net_device *ndev, const u8 *mac,
-				       struct station_info *sinfo)
+					       struct net_device *ndev, const u8 *mac,
+					       struct station_info *sinfo)
 {
 	struct sprdwl_vif *vif = netdev_priv(ndev);
 	struct sprdwl_cmd_get_station sta;
@@ -1179,6 +1386,8 @@ out:
 }
 #endif
 
+
+
 static int sprdwl_cfg80211_set_channel(struct wiphy *wiphy,
 				       struct net_device *ndev,
 				       struct ieee80211_channel *chan)
@@ -1216,12 +1425,19 @@ void sprdwl_report_softap(struct sprdwl_vif *vif, u8 is_connect, u8 *addr,
 			netif_carrier_on(vif->ndev);
 			netif_wake_queue(vif->ndev);
 		}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+		cfg80211_new_sta(&vif->wdev, addr, &sinfo, GFP_KERNEL);
+#else
 		cfg80211_new_sta(vif->ndev, addr, &sinfo, GFP_KERNEL);
+#endif
 		wl_ndev_log(L_DBG, vif->ndev, "New station (%pM) connected\n", addr);
 	} else {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+		cfg80211_del_sta(&vif->wdev, addr, GFP_KERNEL);
+#else
 		cfg80211_del_sta(vif->ndev, addr, GFP_KERNEL);
-		wl_ndev_log(L_DBG, vif->ndev, "The station (%pM) disconnected\n",
-			    addr);
+#endif
+			wl_ndev_log(L_DBG, vif->ndev, "The station (%pM) disconnected\n", addr);
 		trace_deauth_reason(vif->mode, 0, REMOTE_EVENT);
 	}
 }
@@ -1240,7 +1456,11 @@ void sprdwl_cancel_scan(struct sprdwl_vif *vif)
 
 	if (priv->scan_vif && priv->scan_vif == vif) {
 		if (timer_pending(&priv->scan_timer))
+			#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+			timer_delete_sync(&priv->scan_timer);
+			#else
 			del_timer_sync(&priv->scan_timer);
+			#endif
 
 		spin_lock_bh(&priv->scan_lock);
 
@@ -1300,7 +1520,11 @@ void sprdwl_scan_done(struct sprdwl_vif *vif, bool abort)
 
 	if (priv->scan_vif && priv->scan_vif == vif) {
 		if (timer_pending(&priv->scan_timer))
+			#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+			timer_delete_sync(&priv->scan_timer);
+			#else
 			del_timer_sync(&priv->scan_timer);
+			#endif
 
 		spin_lock_bh(&priv->scan_lock);
 		if (priv->scan_request) {
@@ -1359,7 +1583,11 @@ void sprdwl_sched_scan_done(struct sprdwl_vif *vif, bool abort)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 void sprdwl_scan_timeout(struct timer_list *t)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+	struct sprdwl_priv *priv = timer_container_of(priv, t, scan_timer);
+#else
 	struct sprdwl_priv *priv = from_timer(priv, t, scan_timer);
+#endif
 #else
 void sprdwl_scan_timeout(unsigned long data)
 {
@@ -2022,7 +2250,11 @@ err:
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static int sprdwl_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed)
+#else
 static int sprdwl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
+#endif
 {
 	struct sprdwl_priv *priv = wiphy_priv(wiphy);
 	u32 rts = 0, frag = 0;
@@ -2371,7 +2603,7 @@ void sprdwl_report_connection(struct sprdwl_vif *vif,
 		 conn_info->status == SPRDWL_ROAM_SUCCESS){
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 		struct cfg80211_roam_info roam_info = {
-			.bss = bss,
+			.links[0].bss = bss,
 			.req_ie = conn_info->req_ie,
 			.req_ie_len = conn_info->req_ie_len,
 			.resp_ie = conn_info->resp_ie,

@@ -23,7 +23,12 @@
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#include <linux/gpio/consumer.h>
+#else
 #include <linux/of_gpio.h>
+#endif
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
