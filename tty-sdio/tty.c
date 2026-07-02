@@ -466,8 +466,13 @@ static  int sdio_data_transmit(uint8_t *data, size_t count)
 	return mtty_write(NULL, data, count);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 static ssize_t mtty_write_plus(struct tty_struct *tty, const u8 *buf,
-			     size_t count)
+				 size_t count)
+#else
+static int mtty_write_plus(struct tty_struct *tty, const u8 *buf,
+			     int count)
+#endif
 {
 	return sitm_write(buf, count, sdio_data_transmit);
 }
@@ -815,7 +820,11 @@ static void  mtty_shutdown(struct platform_device *pdev)
 }
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 static void mtty_remove(struct platform_device *pdev)
+#else
+static int mtty_remove(struct platform_device *pdev)
+#endif
 {
 	struct mtty_device *mtty = platform_get_drvdata(pdev);
 
@@ -834,7 +843,9 @@ static void mtty_remove(struct platform_device *pdev)
 //#endif
 	bluesleep_exit();
 
-	return;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+	return 0;
+#endif
 }
 
 static const struct of_device_id mtty_match_table[] = {

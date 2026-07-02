@@ -3299,7 +3299,7 @@ void sprdwl_event_chan_changed(struct sprdwl_vif *vif, u8 *data, u16 len)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,9, 0))
 		cfg80211_ch_switch_notify(vif->ndev, &chandef, 0);
 #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19, 2))
-		cfg80211_ch_switch_notify(vif->ndev, &chandef, 0, 0);
+		cfg80211_ch_switch_notify(vif->ndev, &chandef, 0);
 #else
 		cfg80211_ch_switch_notify(vif->ndev, &chandef);
 #endif
