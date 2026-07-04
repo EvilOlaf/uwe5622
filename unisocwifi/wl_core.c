@@ -595,10 +595,6 @@ static int sprdwl_probe(struct platform_device *pdev)
 	int ret;
 	u8 i;
 
-#ifdef CP2_RESET_SUPPORT
-	marlin_reset_callback_register(MARLIN_WIFI, &wifi_reset_notifier);
-#endif
-
 	if (start_marlin(MARLIN_WIFI)) {
 		wl_err("%s power on chipset failed\n", __func__);
 		return -ENODEV;
@@ -688,6 +684,10 @@ static int sprdwl_probe(struct platform_device *pdev)
 
 	sprdwl_debugfs_init(intf);
 	cpufreq_register_notifier(&boost_notifier, CPUFREQ_POLICY_NOTIFIER);
+
+#ifdef CP2_RESET_SUPPORT
+	marlin_reset_callback_register(MARLIN_WIFI, &wifi_reset_notifier);
+#endif
 
 	return ret;
 
