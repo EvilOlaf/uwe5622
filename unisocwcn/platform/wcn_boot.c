@@ -2640,6 +2640,7 @@ static int check_cp_ready(void)
 					__func__, ret);
 				return ret;
 			}
+			msleep(20);  /* Give firmware time to process verify data */
 		}
 #endif
 		else

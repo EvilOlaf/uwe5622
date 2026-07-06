@@ -915,11 +915,40 @@ static void sprdwl_set_multicast(struct net_device *ndev)
 
 static int sprdwl_set_mac(struct net_device *dev, void *addr)
 {
+	struct sprdwl_vif *vif = netdev_priv(dev);
+	struct sockaddr *sa = (struct sockaddr *)addr;
+
 	if (!dev) {
 		netdev_err(dev, "Invalid net device\n");
 		return -EINVAL;
 	}
 
+	netdev_info(dev, "start set random mac: %pM\n", sa->sa_data);
+	if (is_multicast_ether_addr(sa->sa_data)) {
+		netdev_err(dev, "invalid, it is multicast addr: %pM\n", sa->sa_data);
+		return -EINVAL;
+	}
+
+	if (vif->mode == SPRDWL_MODE_STATION) {
+		if (!is_zero_ether_addr(sa->sa_data)) {
+			vif->has_rand_mac = true;
+			memcpy(vif->random_mac, sa->sa_data, ETH_ALEN);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+			dev_addr_set(dev, sa->sa_data);
+#else
+			memcpy(dev->dev_addr, sa->sa_data, ETH_ALEN);
+#endif
+		} else {
+			vif->has_rand_mac = false;
+			netdev_info(dev, "need clear random mac for sta/softap mode\n");
+			memset(vif->random_mac, 0, ETH_ALEN);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+			dev_addr_set(dev, vif->mac);
+#else
+			memcpy(dev->dev_addr, vif->mac, ETH_ALEN);
+#endif
+		}
+	}
 	/*return success to pass vts test*/
 	return 0;
 }
@@ -1356,6 +1385,7 @@ static struct sprdwl_vif *sprdwl_register_netdev(struct sprdwl_priv *priv,
 	struct wireless_dev *wdev;
 	struct sprdwl_vif *vif;
 	int ret;
+	u8 target_mac_addr[ETH_ALEN] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0))
 	ndev = alloc_netdev(sizeof(*vif), name, NET_NAME_UNKNOWN, ether_setup);
@@ -1411,7 +1441,8 @@ static struct sprdwl_vif *sprdwl_register_netdev(struct sprdwl_priv *priv,
 	ndev->features |= NETIF_F_SG;
 	SET_NETDEV_DEV(ndev, wiphy_dev(priv->wiphy));
 
-	sprdwl_set_mac_addr(vif, addr, ndev->dev_addr);
+	sprdwl_set_mac_addr(vif, addr, target_mac_addr);
+	dev_addr_set(ndev, target_mac_addr);
 
 #ifdef CONFIG_P2P_INTF
 	if (type == NL80211_IFTYPE_P2P_DEVICE)

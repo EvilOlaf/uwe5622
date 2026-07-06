@@ -735,9 +735,31 @@ static int sprdwl_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wde
 					     params->cipher, params->seq,
 					     mac_addr);
 }
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static int sprdwl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
 				   int link_id, u8 key_index, bool pairwise,
+				   const u8 *mac_addr,
+				   struct key_params *params)
+{
+	struct sprdwl_vif *vif = netdev_priv(ndev);
+
+	vif->key_index[pairwise] = key_index;
+	vif->key_len[pairwise][key_index] = params->key_len;
+	memcpy(vif->key[pairwise][key_index], params->key, params->key_len);
+
+	/* PMK is for Roaming offload */
+	if (params->cipher == WLAN_CIPHER_SUITE_PMK)
+		return sprdwl_set_roam_offload(vif->priv, vif->ctx_id,
+					       SPRDWL_ROAM_OFFLOAD_SET_PMK,
+					       params->key, params->key_len);
+	else
+		return sprdwl_add_cipher_key(vif, pairwise, key_index,
+					     params->cipher, params->seq,
+					     mac_addr);
+}
+#else
+static int sprdwl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
+				   u8 key_index, bool pairwise,
 				   const u8 *mac_addr,
 				   struct key_params *params)
 {
@@ -788,7 +810,7 @@ static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wde
 	return sprdwl_del_key(vif->priv, vif->ctx_id, key_index,
 			      pairwise, mac_addr);
 }
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
 				   int link_id, u8 key_index, bool pairwise,
 				   const u8 *mac_addr)
@@ -817,13 +839,48 @@ static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
 	return sprdwl_del_key(vif->priv, vif->ctx_id, key_index,
 			      pairwise, mac_addr);
 }
+#else
+static int sprdwl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
+				   u8 key_index, bool pairwise,
+				   const u8 *mac_addr)
+{
+	struct sprdwl_vif *vif = netdev_priv(ndev);
+
+	wl_ndev_log(L_DBG, ndev, "%s key_index=%d, pairwise=%d\n",
+		    __func__, key_index, pairwise);
+
+	if (key_index > SPRDWL_MAX_KEY_INDEX) {
+		wl_ndev_log(L_ERR, ndev, "%s key index %d out of bounds!\n", __func__,
+			   key_index);
+		return -ENOENT;
+	}
+
+	if (!vif->key_len[pairwise][key_index]) {
+		wl_ndev_log(L_ERR, ndev, "%s key index %d is empty!\n", __func__,
+			   key_index);
+		return 0;
+	}
+
+	vif->key_len[pairwise][key_index] = 0;
+	vif->prwise_crypto = SPRDWL_CIPHER_NONE;
+	vif->grp_crypto = SPRDWL_CIPHER_NONE;
+
+	return sprdwl_del_key(vif->priv, vif->ctx_id, key_index,
+			      pairwise, mac_addr);
+}
 #endif
 
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 static int sprdwl_cfg80211_set_default_key(struct wiphy *wiphy,
 					   struct net_device *ndev,
 					   int link_id, u8 key_index, bool unicast,
 					   bool multicast)
+#else
+static int sprdwl_cfg80211_set_default_key(struct wiphy *wiphy,
+					   struct net_device *ndev,
+					   u8 key_index, bool unicast,
+					   bool multicast)
+#endif
 {
 	struct sprdwl_vif *vif = netdev_priv(ndev);
 
@@ -2603,7 +2660,11 @@ void sprdwl_report_connection(struct sprdwl_vif *vif,
 		 conn_info->status == SPRDWL_ROAM_SUCCESS){
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 		struct cfg80211_roam_info roam_info = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 			.links[0].bss = bss,
+#else
+			.bss = bss,
+#endif
 			.req_ie = conn_info->req_ie,
 			.req_ie_len = conn_info->req_ie_len,
 			.resp_ie = conn_info->resp_ie,
