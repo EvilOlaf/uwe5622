@@ -317,10 +317,13 @@ void sprdwl_dequeue_data_list(struct mbuf_t *head, int num)
 /* seam for tx_thread */
 void tx_down(struct sprdwl_tx_msg *tx_msg)
 {
+	int ret;
 	/* wait_for_completion may cause hung_task_timeout_secs
 	 * with message of task blocked for more than 120 seconds.
 	 */
-	wait_for_completion_interruptible(&tx_msg->tx_completed);
+	do {
+		ret = wait_for_completion_interruptible(&tx_msg->tx_completed);
+	} while (ret == -ERESTARTSYS);
 }
 
 void tx_up(struct sprdwl_tx_msg *tx_msg)
@@ -1480,6 +1483,7 @@ int sprdwl_tx_init(struct sprdwl_intf *intf)
 	tx_msg->intf = intf;
 
 	init_completion(&tx_msg->tx_completed);
+	complete(&tx_msg->tx_completed); /* Prime completion so first tx_down() doesn't hang */
 	wake_up_process(tx_msg->tx_thread);
 
 #ifdef WMMAC_WFA_CERTIFICATION
