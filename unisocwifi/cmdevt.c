@@ -1319,7 +1319,7 @@ int sprdwl_scan(struct sprdwl_priv *priv, u8 vif_ctx_id,
 
 	struct sprdwl_5g_chn {
 		u16 n_5g_chn;
-		u16 chns[0];
+		DECLARE_FLEX_ARRAY(u16, chns);
 	} *ext_5g;
 
 	chns_len_5g = chn_count_5g * sizeof(*chns_5g);
@@ -3556,7 +3556,7 @@ int sprdwl_set_wowlan(struct sprdwl_priv *priv, int subcmd, void *pad, int pad_l
 	struct wowlan_cmd {
 		u8 sub_cmd_id;
 		u8 pad_len;
-		char pad[0];
+		DECLARE_FLEX_ARRAY(u8, pad);
 	} *cmd;
 
 	if (priv == NULL)

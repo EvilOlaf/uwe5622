@@ -1571,7 +1571,7 @@ struct sprdwl_epno_results {
 	u64 boot_time;
 	u8 request_id;
 	u8 nr_scan_results;
-	struct sprdwl_gscan_result results[0];
+	DECLARE_FLEX_ARRAY(struct sprdwl_gscan_result, results);
 } __packed;
 
 struct wifi_ssid {
